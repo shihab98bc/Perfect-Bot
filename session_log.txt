@@ -1,0 +1,7 @@
+[2025-08-06 12:02:37] NUMBER_ISSUED - User: 5705479420 | Number: 255715302996 | Category: Bangladesh 🇧🇩 
+[2025-08-06 12:13:11] NUMBER_ISSUED - User: 5705479420 | Number: 255715302996 | Category: Bangladesh 🇧🇩 
+[2025-08-06 12:14:43] NUMBER_ISSUED - User: 5705479420 | Number: 2250160845313 | Category: Afganistan 🇦🇫 
+[2025-08-06 12:23:36] SESSION_EXPIRED - User: 5705479420 | Number: 255715302996 | Category: Bangladesh 🇧🇩 
+[2025-08-06 12:25:36] SESSION_EXPIRED - User: 5705479420 | Number: 2250160845313 | Category: Afganistan 🇦🇫 
+[2025-08-06 12:27:13] NUMBER_ISSUED - User: 5705479420 | Number: 255657285711 | Category: Bangladesh 🇧🇩 
+[2025-08-06 12:33:52] NUMBER_ISSUED - User: 5705479420 | Number: 255777844156 | Category: Bangladesh 🇧🇩 

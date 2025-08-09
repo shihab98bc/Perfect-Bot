@@ -1,0 +1,106 @@
+{
+  "buttons": [
+    {
+      "name": "What'app",
+      "sub_buttons": [
+        "kosovo \ud83c\uddfd\ud83c\uddf0"
+      ]
+    },
+    {
+      "name": "Facebook",
+      "sub_buttons": [
+        "Mali \ud83c\uddf2\ud83c\uddf1",
+        "Madagascar\ud83c\uddf2\ud83c\uddec",
+        "Angola \ud83c\udde6\ud83c\uddf4"
+      ]
+    }
+  ],
+  "users": {
+    "5705479420": {
+      "first_name": "Md Shihab",
+      "last_name": "Uddin",
+      "username": "shihab98bc"
+    },
+    "6316982441": {
+      "first_name": "Try Sell",
+      "last_name": "BD",
+      "username": "shihab98mn"
+    },
+    "6132360323": {
+      "first_name": "Rafin",
+      "last_name": null,
+      "username": "rafin54f"
+    },
+    "5991570720": {
+      "first_name": "MAIC",
+      "last_name": null,
+      "username": "Maic253"
+    },
+    "7483808370": {
+      "first_name": "Mind HunTer\ud83e\udd82",
+      "last_name": null,
+      "username": "Thunder_Strom12"
+    },
+    "6788609890": {
+      "first_name": "ALPHA",
+      "last_name": "ADMIN",
+      "username": "alpha69admin"
+    },
+    "5731090783": {
+      "first_name": "\ud835\udc18\ud835\udc28\ud835\udc28\ud835\udc2d\ud835\udc1e\ud835\udc25\ud835\udc28",
+      "last_name": "\ud83c\udde7\ud83c\udde9\ud83e\udef6\ud83c\uddf5\ud83c\uddf8",
+      "username": "Yoooteloooo"
+    },
+    "7467609186": {
+      "first_name": "\u0286\u028c\u0280\u028c\u0253\u0269 \u0286\u028c\u0280\u028b\u0138 \u0280o\u029c\u028c\u014b",
+      "last_name": null,
+      "username": "FFR01"
+    },
+    "7114002218": {
+      "first_name": "Husnain",
+      "last_name": null,
+      "username": "Helloidiotss"
+    },
+    "7463886215": {
+      "first_name": "Md Sifat",
+      "last_name": "Ali",
+      "username": "sifat9910"
+    },
+    "7297267975": {
+      "first_name": "HRidoy",
+      "last_name": "Hasan",
+      "username": null
+    }
+  },
+  "number_progress": {
+    "What'app": {
+      "kosovo \ud83c\uddfd\ud83c\uddf0": 0
+    },
+    "Facebook": {
+      "Mali \ud83c\uddf2\ud83c\uddf1": 1,
+      "Madagascar\ud83c\uddf2\ud83c\uddec": 2,
+      "Angola \ud83c\udde6\ud83c\uddf4": 4
+    }
+  },
+  "blacklist": [],
+  "user_2fa_secrets": {
+    "5705479420": "2JUJ 4RPG L6SO K5Q6 S6I7 XDA5 VD3E US4L",
+    "6132360323": "2JUJ 4RPG L6SO K5Q6 S6I7 XDA5 VD3E US4N",
+    "5731090783": "Wywisksksjdkshgsgjd"
+  },
+  "monitoring_enabled": true,
+  "auto_forward": true,
+  "otp_link": "https://t.me/trysellbd",
+  "otp_group_link": "https://t.me/otpservers",
+  "number_to_user": {
+    "2250711435354": "5705479420",
+    "2250711431856": "5705479420",
+    "2250711433006": "5991570720",
+    "2250711434221": "5705479420",
+    "2250711432409": "5705479420",
+    "2250711438826": "5705479420",
+    "2250711438107": "5705479420",
+    "2250711433031": "5705479420"
+  },
+  "number_to_user_map": {}
+}
