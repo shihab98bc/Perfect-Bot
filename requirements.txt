@@ -1,3 +1,6 @@
-python-telegram-bot==20.3
-faker==18.11.2
+python-telegram-bot
+apscheduler
+pytz
 pyotp
+faker
+openpyxl
