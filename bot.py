@@ -7,11 +7,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 import shutil
+import pytz
 
 from faker import Faker
 import pyotp
+import openpyxl
+from openpyxl.utils.exceptions import InvalidFileException
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -27,12 +32,14 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # File paths
 CONFIG_FILE = Path("config.json")
 DATA_FILE = Path("data.json")
 UPLOADS_DIR = Path("uploads")
+USER_UPLOADS_DIR = UPLOADS_DIR / "user_files"
 
 # Load configuration
 if not CONFIG_FILE.exists():
@@ -50,6 +57,9 @@ number_lock = asyncio.Lock()
 last_number_time = 0
 COOLDOWN_SECONDS = 10
 
+# Scheduler for automated tasks
+scheduler = AsyncIOScheduler()
+
 # --- Data Handling Helper Functions ---
 def save_data(data):
     """Saves data to data.json"""
@@ -66,7 +76,13 @@ def load_data():
         "number_progress": {},
         "blacklist": [],
         "user_2fa_secrets": {},
-        "otp_group_link": "https://t.me/+p2ppOgkSosNhZGI1"
+        "otp_group_link": "https://t.me/+p2ppOgkSosNhZGI1",
+        "file_submission_buttons": [],
+        "delivery_schedule": {
+            "time": None,
+            "timezone": "Asia/Dhaka",
+            "job_id": "daily_merge_job"
+        }
     }
     
     data = default_data
@@ -127,8 +143,10 @@ def escape_markdown(text: str) -> str:
 # Initial load of data
 load_data()
 
-# Ensure uploads directory exists
+# Ensure uploads directories exist
 UPLOADS_DIR.mkdir(exist_ok=True)
+USER_UPLOADS_DIR.mkdir(exist_ok=True)
+
 
 # --- User & Admin Helper Functions ---
 def is_admin(user_id: int) -> bool:
@@ -150,35 +168,23 @@ async def set_user_state(context: ContextTypes.DEFAULT_TYPE, state: str | None):
     context.user_data['next_action'] = state
 
 # --- Keyboard Menus ---
-MAIN_MENU_USER = get_keyboard(["🔢 Get Number", "🎭 Fake Name", "📲 Get 2FA", "ℹ️ Info", "🆘 Support"])
-MAIN_MENU_ADMIN = get_keyboard(["🔢 Get Number", "🎭 Fake Name", "📲 Get 2FA", "ℹ️ Info", "🆘 Support", "⚙️ Admin Panel"])
+MAIN_MENU_USER = get_keyboard(["🔢 Get Number", "✍️ Submit File", "🎭 Fake Name", "📲 Get 2FA", "ℹ️ Info", "🆘 Support"])
+MAIN_MENU_ADMIN = get_keyboard(["🔢 Get Number", "✍️ Submit File", "🎭 Fake Name", "📲 Get 2FA", "ℹ️ Info", "🆘 Support", "⚙️ Admin Panel", "📢 Broadcast"])
 ADMIN_PANEL_MENU = get_keyboard([
-    "➕ Add Button",
-    "🗑️ Remove Button",
-    "📤 Upload File",
-    "👥 User List",
-    "🔗 Set OTP Group Link",
-    "🚫 Off OTP Group Link",
+    "➕ Add Button", "🗑️ Remove Button", "📤 Upload File",
+    "✍️ Add File Name", "❌ Remove File Name", "⏰ Set time (Bangladesh)",
+    "👥 User List", "🔗 Set OTP Group Link", "🚫 Off OTP Group Link",
     "⬅️ Back to Main Menu"
-])
-ADD_REMOVE_BUTTON_MENU = get_keyboard([
-    "1️⃣ Add Main Button",
-    "2️⃣ Add Sub Button",
-    "↩️ Back to Admin Panel"
-])
-REMOVE_BUTTON_MENU = get_keyboard([
-    "1️⃣ Remove Main Button",
-    "2️⃣ Remove Sub Button",
-    "↩️ Back to Admin Panel"
-])
+], items_per_row=3)
+ADD_REMOVE_BUTTON_MENU = get_keyboard(["1️⃣ Add Main Button", "2️⃣ Add Sub Button", "↩️ Back to Admin Panel"])
+REMOVE_BUTTON_MENU = get_keyboard(["1️⃣ Remove Main Button", "2️⃣ Remove Sub Button", "↩️ Back to Admin Panel"])
 GENDER_SELECTION_MENU = get_keyboard(["👨 Male", "👩 Female", "⬅️ Back to Main Menu"])
 CANCEL_ACTION_MENU = get_keyboard(["↩️ Back to Admin Panel"], items_per_row=1)
 
 # --- Start & Back Commands ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handles the /start command.
-    Welcomes new users once and shows the main menu. For existing users, it just clears state and shows the main menu.
+    Handles the /start command. Welcomes new users once and shows the main menu. For existing users, it just clears state and shows the main menu.
     """
     user = update.effective_user
     if is_blacklisted(user.id):
@@ -267,7 +273,7 @@ async def show_sub_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     sub_buttons = main_button.get('sub_buttons', [])
     if not sub_buttons:
         await update.message.reply_text(
-            "*Sorry, no numbers are available in this sub\-category yet\\.*",
+            "*Sorry, no numbers are available in this sub\\-category yet\\.*",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         await get_number_menu(update, context)
@@ -278,7 +284,7 @@ async def show_sub_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await set_user_state(context, 'awaiting_number_category')
     context.user_data['main_button_context'] = main_button_name
     await update.message.reply_text(
-        f"*Please choose a sub\-category from '{escape_markdown(main_button_name)}':*",
+        f"*Please choose a sub\\-category from '{escape_markdown(main_button_name)}':*",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -356,6 +362,85 @@ async def give_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "*An error occurred\\. Please try again later\\.*",
                 parse_mode=ParseMode.MARKDOWN_V2
             )
+
+# --- User File Submission ---
+async def submit_file_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the dynamic list of sub-buttons for file submission."""
+    data = load_data()
+    buttons = data.get("file_submission_buttons", [])
+    if not buttons:
+        await update.message.reply_text(
+            "*Sorry, no file submission categories are available right now\\.*",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    keyboard_buttons = buttons + ["⬅️ Back to Main Menu"]
+    reply_markup = get_keyboard(keyboard_buttons)
+    await set_user_state(context, 'awaiting_file_submission_category')
+    await update.message.reply_text(
+        "*Please choose a category to submit your file:*",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+async def handle_file_submission_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """After user selects a category, asks for the .xlsx file."""
+    category_name = update.message.text
+    data = load_data()
+
+    if category_name not in data.get("file_submission_buttons", []):
+        await update.message.reply_text("*Invalid category selection\\.*", parse_mode=ParseMode.MARKDOWN_V2)
+        await submit_file_menu(update, context)
+        return
+
+    context.user_data['file_submission_category'] = category_name
+    await set_user_state(context, 'awaiting_xlsx_upload')
+    
+    message = (
+        f"*You have selected '{escape_markdown(category_name)}'\\.*\n\n"
+        "*Please upload your \\.xlsx file now\\.*"
+    )
+    
+    await update.message.reply_text(
+        message,
+        reply_markup=get_keyboard(["⬅️ Back to Main Menu"]),
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+async def receive_user_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receives and saves a user's .xlsx file."""
+    document = update.message.document
+    user_id = update.effective_user.id
+    category = context.user_data.get('file_submission_category')
+
+    if not category:
+        await update.message.reply_text(
+            "*An error occurred, please select a category first\\.*",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    # Create user-specific directory if it doesn't exist
+    user_dir = USER_UPLOADS_DIR / str(user_id)
+    user_dir.mkdir(exist_ok=True)
+    
+    file_path = user_dir / f"{category}.xlsx"
+    
+    # Remove old file if it exists
+    if file_path.exists():
+        os.remove(file_path)
+        logger.info(f"Replacing existing file for user {user_id} in category '{category}'.")
+
+    new_file = await document.get_file()
+    await new_file.download_to_drive(file_path)
+
+    await update.message.reply_text(
+        f"*✅ Your file for '{escape_markdown(category)}' has been successfully submitted\\!*",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+    # Go back to the main menu
+    await start(update, context)
 
 async def fake_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Asks the user to select a gender for the fake name."""
@@ -559,7 +644,299 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
-# --- Admin: Add Button menu ---
+# --- Admin: Broadcast ---
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Asks the admin to provide the broadcast message."""
+    await set_user_state(context, 'awaiting_broadcast_message')
+    await update.message.reply_text(
+        "*Please send the message you want to broadcast to all users, or go back\\.*",
+        reply_markup=CANCEL_ACTION_MENU,
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Broadcasts the message to all users."""
+    message_text = update.message.text
+    if message_text == "↩️ Back to Admin Panel":
+        await back_to_admin_panel(update, context)
+        return
+
+    data = load_data()
+    escaped_message = escape_markdown(message_text)
+    notification_text = f"*📢 Broadcast Message:*\n\n{escaped_message}"
+
+    for user_id in data.get("users", {}).keys():
+        if int(user_id) != update.effective_user.id:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=notification_text,
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            except Exception as e:
+                logger.warning(f"Could not send broadcast to user {user_id}: {e}")
+
+    await update.message.reply_text(
+        "*✅ Broadcast message sent to all users\\!*",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+    await back_to_admin_panel(update, context)
+
+# --- Admin: Add/Remove File Submission Buttons ---
+async def add_file_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Asks for the name of the new file submission button."""
+    await set_user_state(context, 'awaiting_file_name_add')
+    await update.message.reply_text(
+        "*Please send the name for the new file submission category \\(e\\.g\\., Netflix\\), or go back\\.*",
+        reply_markup=CANCEL_ACTION_MENU,
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+async def add_file_name_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Adds the new file submission button name."""
+    button_name = update.message.text
+    if button_name == "↩️ Back to Admin Panel":
+        await back_to_admin_panel(update, context)
+        return
+
+    data = load_data()
+    if button_name in data["file_submission_buttons"]:
+        await update.message.reply_text(
+            "*This category name already exists\\. Please choose another name\\.*",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    data["file_submission_buttons"].append(button_name)
+    save_data(data)
+    await update.message.reply_text(
+        f"*✅ File submission category '{escape_markdown(button_name)}' added successfully\\!*",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+    await back_to_admin_panel(update, context)
+
+async def remove_file_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows existing file submission buttons for removal."""
+    data = load_data()
+    buttons = data.get("file_submission_buttons", [])
+    if not buttons:
+        await update.message.reply_text(
+            "*There are no file submission categories to remove\\.*",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        await back_to_admin_panel(update, context)
+        return
+
+    keyboard = get_keyboard(buttons + ["↩️ Back to Admin Panel"])
+    await set_user_state(context, 'awaiting_file_name_to_remove')
+    await update.message.reply_text(
+        "*Select a file submission category to remove:*",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+async def remove_file_name_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Removes the selected file submission button."""
+    button_name = update.message.text
+    if button_name == "↩️ Back to Admin Panel":
+        await back_to_admin_panel(update, context)
+        return
+
+    data = load_data()
+    if button_name in data["file_submission_buttons"]:
+        data["file_submission_buttons"].remove(button_name)
+        save_data(data)
+        await update.message.reply_text(
+            f"*🗑️ File submission category '{escape_markdown(button_name)}' removed\\.*",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    else:
+        await update.message.reply_text(
+            "*Error: Category not found\\.*",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    
+    await back_to_admin_panel(update, context)
+
+# --- Admin: Set Delivery Time & Scheduling ---
+async def set_delivery_time_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Asks admin for the daily delivery time."""
+    data = load_data()
+    schedule_info = data.get("delivery_schedule", {})
+    current_time_24h = schedule_info.get("time")
+    
+    current_time_str = "Not set"
+    if current_time_24h:
+        try:
+            time_obj = datetime.strptime(current_time_24h, "%H:%M").time()
+            current_time_str = time_obj.strftime("%I:%M %p")
+        except ValueError:
+            current_time_str = "Invalid format"
+
+    await set_user_state(context, 'awaiting_delivery_time')
+    await update.message.reply_text(
+        "*Please send the daily delivery time for the master file\\.*\n"
+        f"\\(Current: *{escape_markdown(current_time_str)}*\\)\n\n"
+        "Use 12\\-hour format with AM/PM \\(e\\.g\\., `10:30 AM`, `7:45 PM`\\)\\.",
+        reply_markup=CANCEL_ACTION_MENU,
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+async def set_delivery_time_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receives, validates, and sets the daily delivery time."""
+    time_input = update.message.text
+    if time_input == "↩️ Back to Admin Panel":
+        await back_to_admin_panel(update, context)
+        return
+
+    # Regex to validate "HH:MM AM/PM" format and capture parts
+    match = re.match(r'^(0?[1-9]|1[0-2]):([0-5][0-9])\s*([AP]M)$', time_input, re.IGNORECASE)
+    
+    if not match:
+        await update.message.reply_text(
+            "*Invalid time format\\.* Please use a valid 12\\-hour format like `10:30 AM` or `7:45 PM`\\.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    hour_12, minute, am_pm = match.groups()
+    hour_12, minute = int(hour_12), int(minute)
+    am_pm = am_pm.upper()
+
+    hour_24 = hour_12
+    if am_pm == 'PM' and hour_12 != 12:
+        hour_24 += 12
+    elif am_pm == 'AM' and hour_12 == 12:
+        hour_24 = 0
+
+    data = load_data()
+    data["delivery_schedule"]["time"] = f"{hour_24:02d}:{minute:02d}"
+    save_data(data)
+    
+    # Reschedule the job
+    await schedule_daily_job(context.application)
+
+    await update.message.reply_text(
+        f"*✅ Daily delivery time set to {escape_markdown(time_input)} Bangladesh Time\\.*",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+    await back_to_admin_panel(update, context)
+
+async def merge_and_send_files(application: Application):
+    """
+    Merges user files for each category into a separate report
+    and sends each report individually to admins only if there is data.
+    """
+    logger.info("Starting daily file merge and send process.")
+    data = load_data()
+    categories = data.get("file_submission_buttons", [])
+    report_date = datetime.now(pytz.timezone('Asia/Dhaka')).strftime("%Y-%m-%d")
+
+    if not categories:
+        logger.info("No file submission categories configured. Skipping merge.")
+        return
+
+    # Process each category individually
+    for category in categories:
+        logger.info(f"Processing report for category: {category}")
+        
+        # Create a new workbook for each category
+        wb = openpyxl.Workbook()
+        sheet = wb.active
+        sheet.title = category
+
+        user_files = list(USER_UPLOADS_DIR.glob(f"*/{category}.xlsx"))
+
+        if not user_files:
+            logger.warning(f"No files submitted for category '{category}'. Skipping.")
+            continue
+            
+        has_data_for_category = False
+        is_header_written = False
+
+        # Aggregate data from all users for the current category
+        for user_file_path in user_files:
+            try:
+                user_wb = openpyxl.load_workbook(user_file_path)
+                user_sheet = user_wb.active
+                
+                # Write header only once from the first file
+                if not is_header_written and user_sheet.max_row > 0:
+                    header = [cell.value for cell in user_sheet[1] if cell.value is not None]
+                    if header:
+                        sheet.append(header)
+                        is_header_written = True
+
+                # Append data rows (skip header)
+                for row_idx in range(2, user_sheet.max_row + 1):
+                    row_data = [cell.value for cell in user_sheet[row_idx]]
+                    if any(row_data):  # only append if row is not empty
+                        sheet.append(row_data)
+                        has_data_for_category = True
+                        
+            except (InvalidFileException, Exception) as e:
+                logger.error(f"Could not process file {user_file_path}: {e}")
+
+        # Delete user files after processing
+        for user_file_path in user_files:
+            os.remove(user_file_path)
+
+        # Additional check to ensure there is data beyond header
+        if sheet.max_row <= 1 or not has_data_for_category:
+            logger.info(f"Only header or no data for category '{category}'. Skipping report.")
+            continue
+        
+        report_filename = f"{category}_Report_{report_date}.xlsx"
+        wb.save(report_filename)
+        
+        caption = f"*Daily User File Report for '{escape_markdown(category)}' on {escape_markdown(report_date)}*"
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                await application.bot.send_document(
+                    chat_id=admin_id,
+                    document=open(report_filename, 'rb'),
+                    filename=report_filename,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+                logger.info(f"Sent '{category}' report to admin {admin_id}.")
+            except Exception as e:
+                logger.error(f"Failed to send '{category}' report to admin {admin_id}: {e}")
+                
+        # Clean up the generated report file
+        os.remove(report_filename)
+
+
+async def schedule_daily_job(application: Application):
+    """Schedules or reschedules the daily file merge job based on data.json."""
+    data = load_data()
+    schedule_info = data["delivery_schedule"]
+    job_id = schedule_info["job_id"]
+    
+    # Remove existing job before adding a new one
+    if scheduler.get_job(job_id):
+        scheduler.remove_job(job_id)
+        logger.info(f"Removed existing schedule job '{job_id}'.")
+
+    if schedule_info["time"]:
+        try:
+            hour, minute = map(int, schedule_info["time"].split(':'))
+            timezone = pytz.timezone(schedule_info["timezone"])
+            
+            scheduler.add_job(
+                merge_and_send_files,
+                trigger=CronTrigger(hour=hour, minute=minute, timezone=timezone),
+                id=job_id,
+                name="Daily File Merge",
+                args=[application]
+            )
+            logger.info(f"Scheduled daily report for {hour:02d}:{minute:02d} in {timezone}.")
+        except Exception as e:
+            logger.error(f"Failed to schedule daily job: {e}")
+
+# --- Admin: Add/Remove Number Buttons (Original Logic) ---
+
 async def add_button_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows options to add a main or sub button."""
     await set_user_state(context, 'awaiting_add_type')
@@ -569,7 +946,6 @@ async def add_button_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
-# --- Admin: Add Main Button ---
 async def add_main_button_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Asks for a new main button name."""
     await set_user_state(context, 'awaiting_main_button_name')
@@ -602,14 +978,13 @@ async def add_main_button_receive(update: Update, context: ContextTypes.DEFAULT_
     )
     await back_to_admin_panel(update, context)
 
-# --- Admin: Add Sub Button ---
 async def add_sub_button_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows main buttons to select where to add a sub-button."""
     data = load_data()
     main_buttons = [btn['name'] for btn in data.get("buttons", [])]
     if not main_buttons:
         await update.message.reply_text(
-            "*Please add a main button first before adding a sub\-button\\.*",
+            "*Please add a main button first before adding a sub\\-button\\.*",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         await back_to_admin_panel(update, context)
@@ -619,7 +994,7 @@ async def add_sub_button_start(update: Update, context: ContextTypes.DEFAULT_TYP
     reply_markup = get_keyboard(keyboard_buttons)
     await set_user_state(context, 'awaiting_main_for_sub_add')
     await update.message.reply_text(
-        "*Select a main button to add a sub\-button to:*",
+        "*Select a main button to add a sub\\-button to:*",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -645,7 +1020,7 @@ async def add_sub_button_ask_name(update: Update, context: ContextTypes.DEFAULT_
     context.user_data['main_button_context'] = main_button_name
     await set_user_state(context, 'awaiting_sub_button_name')
     await update.message.reply_text(
-        f"*Please send the name for the new sub\-button under '{escape_markdown(main_button_name)}' \\(e\\.g\\., Netflix\\), or go back\\.*",
+        f"*Please send the name for the new sub\\-button under '{escape_markdown(main_button_name)}' \\(e\\.g\\., Netflix\\), or go back\\.*",
         reply_markup=CANCEL_ACTION_MENU,
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -679,7 +1054,7 @@ async def add_sub_button_receive(update: Update, context: ContextTypes.DEFAULT_T
 
     if sub_button_name in main_button_obj['sub_buttons']:
         await update.message.reply_text(
-            f"*This sub\-button already exists under '{escape_markdown(main_button_name)}'\\. Please choose another name\\.*",
+            f"*This sub\\-button already exists under '{escape_markdown(main_button_name)}'\\. Please choose another name\\.*",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
@@ -687,12 +1062,11 @@ async def add_sub_button_receive(update: Update, context: ContextTypes.DEFAULT_T
     main_button_obj['sub_buttons'].append(sub_button_name)
     save_data(data)
     await update.message.reply_text(
-        f"*✅ Sub\-button '{escape_markdown(sub_button_name)}' added successfully to '{escape_markdown(main_button_name)}'\\!*",
+        f"*✅ Sub\\-button '{escape_markdown(sub_button_name)}' added successfully to '{escape_markdown(main_button_name)}'\\!*",
         parse_mode=ParseMode.MARKDOWN_V2
     )
     await back_to_admin_panel(update, context)
 
-# --- Admin: Remove Button ---
 async def remove_button_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Asks admin whether to remove a main or sub button."""
     data = load_data()
@@ -720,7 +1094,7 @@ async def remove_main_button_start(update: Update, context: ContextTypes.DEFAULT
     reply_markup = get_keyboard(keyboard_buttons)
     await set_user_state(context, 'awaiting_main_button_to_remove')
     await update.message.reply_text(
-        "*Select a main button to remove \\(this will also remove all its sub\-buttons and files\\):*",
+        "*Select a main button to remove \\(this will also remove all its sub\\-buttons and files\\):*",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -753,7 +1127,7 @@ async def remove_main_button_action(update: Update, context: ContextTypes.DEFAUL
     save_data(data)
 
     await update.message.reply_text(
-        f"*🗑️ Main button '{escape_markdown(button_name)}' and all its sub\-buttons/files removed\\.*",
+        f"*🗑️ Main button '{escape_markdown(button_name)}' and all its sub\\-buttons/files removed\\.*",
         parse_mode=ParseMode.MARKDOWN_V2
     )
     await back_to_admin_panel(update, context)
@@ -767,7 +1141,7 @@ async def remove_sub_button_start(update: Update, context: ContextTypes.DEFAULT_
     reply_markup = get_keyboard(keyboard_buttons)
     await set_user_state(context, 'awaiting_main_for_sub_remove')
     await update.message.reply_text(
-        "*Select a main button to see its sub\-buttons for removal:*",
+        "*Select a main button to see its sub\\-buttons for removal:*",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -793,7 +1167,7 @@ async def remove_sub_button_menu(update: Update, context: ContextTypes.DEFAULT_T
     sub_buttons = main_button_obj.get('sub_buttons', [])
     if not sub_buttons:
         await update.message.reply_text(
-            f"*There are no sub\-buttons to remove under '{escape_markdown(main_button_name)}'\\.*",
+            f"*There are no sub\\-buttons to remove under '{escape_markdown(main_button_name)}'\\.*",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         await back_to_admin_panel(update, context)
@@ -804,7 +1178,7 @@ async def remove_sub_button_menu(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data['main_button_context'] = main_button_name
     await set_user_state(context, 'awaiting_sub_button_to_remove')
     await update.message.reply_text(
-        f"*Select a sub\-button to remove from '{escape_markdown(main_button_name)}':*",
+        f"*Select a sub\\-button to remove from '{escape_markdown(main_button_name)}':*",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -839,12 +1213,12 @@ async def remove_sub_button_action(update: Update, context: ContextTypes.DEFAULT
         
         save_data(data)
         await update.message.reply_text(
-            f"*🗑️ Sub\-button '{escape_markdown(sub_button_name)}' removed\\.*",
+            f"*🗑️ Sub\\-button '{escape_markdown(sub_button_name)}' removed\\.*",
             parse_mode=ParseMode.MARKDOWN_V2
         )
     else:
         await update.message.reply_text(
-            "*Error\\: Sub\-button not found\\.*",
+            "*Error\\: Sub\\-button not found\\.*",
             parse_mode=ParseMode.MARKDOWN_V2
         )
     await back_to_admin_panel(update, context)
@@ -893,7 +1267,7 @@ async def upload_file_select_sub(update: Update, context: ContextTypes.DEFAULT_T
     sub_buttons = main_button_obj.get('sub_buttons', [])
     if not sub_buttons:
         await update.message.reply_text(
-            f"*Please add a sub\-button to '{escape_markdown(main_button_name)}' first\\.*",
+            f"*Please add a sub\\-button to '{escape_markdown(main_button_name)}' first\\.*",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         await back_to_admin_panel(update, context)
@@ -904,7 +1278,7 @@ async def upload_file_select_sub(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data['main_button_context'] = main_button_name
     await set_user_state(context, 'awaiting_upload_button_choice')
     await update.message.reply_text(
-        f"*Select the sub\-button for which you want to upload a \\.txt file\\:*",
+        f"*Select the sub\\-button for which you want to upload a \\.txt file\\:*",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -929,14 +1303,14 @@ async def upload_file_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     main_button_obj = next((btn for btn in data['buttons'] if btn['name'] == main_button_name), None)
     if not main_button_obj or sub_button_name not in main_button_obj['sub_buttons']:
         await update.message.reply_text(
-            "*Invalid sub\-button selected\\. Please try again\\.*",
+            "*Invalid sub\\-button selected\\. Please try again\\.*",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         await upload_file_menu(update, context)
         return
 
     context.user_data['sub_button_context'] = sub_button_name
-    await set_user_state(context, 'awaiting_file_upload')
+    await set_user_state(context, 'awaiting_txt_file_upload')
     
     escaped_main = escape_markdown(main_button_name)
     escaped_sub = escape_markdown(sub_button_name)
@@ -948,7 +1322,7 @@ async def upload_file_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
-async def upload_file_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def upload_txt_file_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Receives and processes the uploaded .txt file."""
     document = update.message.document
     main_button_name = context.user_data.get('main_button_context')
@@ -1034,7 +1408,7 @@ async def user_manage_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await back_to_admin_panel(update, context)
         return
 
-    match = re.search(r'\(ID: (\d+)\)', text)
+    match = re.search(r'\(ID:(\d+)\)', text)
     if not match:
         await update.message.reply_text(
             "*Invalid selection\\. Please try again\\.*",
@@ -1046,11 +1420,7 @@ async def user_manage_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id_to_manage = int(match.group(1))
     context.user_data['user_to_manage'] = user_id_to_manage
     
-    data = load_data()
-    is_blocked = user_id_to_manage in data.get("blacklist", [])
-    action_button = "✅ Unblock User" if is_blocked else "🚫 Block User"
-    
-    keyboard = get_keyboard([action_button, "↩️ Back to Admin Panel"])
+    keyboard = get_keyboard(["🚫 Block User", "✅ Unblock User", "↩️ Back to Admin Panel"])
     await set_user_state(context, 'awaiting_user_manage_action')
     await update.message.reply_text(
         f"*Managing user `{user_id_to_manage}`\\. Select an action\\:*",
@@ -1195,56 +1565,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await back_to_admin_panel(update, context)
         return
 
+    # State machine routing
     if state:
-        if state == 'awaiting_main_category':
-            await show_sub_buttons(update, context)
-        elif state == 'awaiting_number_category':
-            await give_number(update, context)
+        # User states
+        if state == 'awaiting_main_category': await show_sub_buttons(update, context)
+        elif state == 'awaiting_number_category': await give_number(update, context)
         elif state == 'awaiting_gender_for_fakename':
             if text in ["👨 Male", "👩 Female"]: await fake_name_generate(update, context)
-        elif state == 'awaiting_2fa_secret':
-            await handle_2fa_secret(update, context)
+        elif state == 'awaiting_2fa_secret': await handle_2fa_secret(update, context)
+        elif state == 'awaiting_file_submission_category': await handle_file_submission_category(update, context)
+        
+        # Admin states
         elif is_admin(user.id):
-            if state == 'awaiting_add_type':
+            if state == 'awaiting_broadcast_message': await broadcast_message(update, context)
+            elif state == 'awaiting_add_type':
                 if text == "1️⃣ Add Main Button": await add_main_button_start(update, context)
                 elif text == "2️⃣ Add Sub Button": await add_sub_button_start(update, context)
             elif state == 'awaiting_remove_type':
                 if text == "1️⃣ Remove Main Button": await remove_main_button_start(update, context)
                 elif text == "2️⃣ Remove Sub Button": await remove_sub_button_start(update, context)
-            elif state == 'awaiting_main_button_name':
-                await add_main_button_receive(update, context)
-            elif state == 'awaiting_main_for_sub_add':
-                await add_sub_button_ask_name(update, context)
-            elif state == 'awaiting_sub_button_name':
-                await add_sub_button_receive(update, context)
-            elif state == 'awaiting_main_button_to_remove':
-                await remove_main_button_action(update, context)
-            elif state == 'awaiting_main_for_sub_remove':
-                await remove_sub_button_menu(update, context)
-            elif state == 'awaiting_sub_button_to_remove':
-                await remove_sub_button_action(update, context)
-            elif state == 'awaiting_main_for_upload':
-                await upload_file_select_sub(update, context)
-            elif state == 'awaiting_upload_button_choice':
-                await upload_file_ask(update, context)
-            elif state == 'awaiting_file_upload':
-                await update.message.reply_text(
-                    "*Please upload a \\.txt file or use the 'Back to Admin Panel' button to cancel\\.*",
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
-            elif state == 'awaiting_user_to_manage':
-                await user_manage_menu(update, context)
+            elif state == 'awaiting_main_button_name': await add_main_button_receive(update, context)
+            elif state == 'awaiting_main_for_sub_add': await add_sub_button_ask_name(update, context)
+            elif state == 'awaiting_sub_button_name': await add_sub_button_receive(update, context)
+            elif state == 'awaiting_main_button_to_remove': await remove_main_button_action(update, context)
+            elif state == 'awaiting_main_for_sub_remove': await remove_sub_button_menu(update, context)
+            elif state == 'awaiting_sub_button_to_remove': await remove_sub_button_action(update, context)
+            elif state == 'awaiting_main_for_upload': await upload_file_select_sub(update, context)
+            elif state == 'awaiting_upload_button_choice': await upload_file_ask(update, context)
+            elif state == 'awaiting_txt_file_upload':
+                await update.message.reply_text("*Please upload a \\.txt file or use the 'Back' button\\.*", parse_mode=ParseMode.MARKDOWN_V2)
+            elif state == 'awaiting_xlsx_upload':
+                await update.message.reply_text("*Please upload an \\.xlsx file or use the 'Back' button\\.*", parse_mode=ParseMode.MARKDOWN_V2)
+            elif state == 'awaiting_user_to_manage': await user_manage_menu(update, context)
             elif state == 'awaiting_user_manage_action':
-                if text in ["🚫 Block User", "✅ Unblock User"]:
-                    await user_toggle_block(update, context)
-                elif text == "↩️ Back to Admin Panel":
-                    await user_list_menu(update, context)
-            elif state == 'awaiting_otp_link':
-                await set_otp_link_receive(update, context)
+                if text in ["🚫 Block User", "✅ Unblock User"]: await user_toggle_block(update, context)
+            elif state == 'awaiting_otp_link': await set_otp_link_receive(update, context)
+            elif state == 'awaiting_file_name_add': await add_file_name_receive(update, context)
+            elif state == 'awaiting_file_name_to_remove': await remove_file_name_action(update, context)
+            elif state == 'awaiting_delivery_time': await set_delivery_time_receive(update, context)
         return
 
     # Standard command routing
     if text == "🔢 Get Number": await get_number_menu(update, context)
+    elif text == "✍️ Submit File": await submit_file_menu(update, context)
     elif text == "🎭 Fake Name": await fake_name_start(update, context)
     elif text == "📲 Get 2FA": await get_2fa_start(update, context)
     elif text == "ℹ️ Info": await info(update, context)
@@ -1257,36 +1620,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif text == "👥 User List": await user_list_menu(update, context)
         elif text == "🔗 Set OTP Group Link": await set_otp_link_start(update, context)
         elif text == "🚫 Off OTP Group Link": await off_otp_link(update, context)
+        elif text == "📢 Broadcast": await broadcast_start(update, context)
+        elif text == "✍️ Add File Name": await add_file_name_start(update, context)
+        elif text == "❌ Remove File Name": await remove_file_name_start(update, context)
+        elif text == "⏰ Set time (Bangladesh)": await set_delivery_time_start(update, context)
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles file uploads."""
+    """Handles file uploads, routing them based on user state."""
     user = update.effective_user
-    if is_blacklisted(user.id) or not is_admin(user.id): 
-        await update.message.reply_text(
-            "*You are not authorized to upload files\\.*",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+    if is_blacklisted(user.id):
+        await update.message.reply_text("*You have been blocked from using this bot\\.*", parse_mode=ParseMode.MARKDOWN_V2)
         return
-    
+        
     state = context.user_data.get('next_action')
-    if state == 'awaiting_file_upload':
-        if not update.message.document.file_name.endswith('.txt'):
-            await update.message.reply_text(
-                "*Invalid file type\\. Please upload a \\.txt file\\.*",
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+    doc = update.message.document
+
+    # Admin uploading .txt file for numbers
+    if is_admin(user.id) and state == 'awaiting_txt_file_upload':
+        if not doc.file_name.lower().endswith('.txt'):
+            await update.message.reply_text("*Invalid file type\\. Please upload a \\.txt file\\.*", parse_mode=ParseMode.MARKDOWN_V2)
             return
-        await upload_file_receive(update, context)
+        await upload_txt_file_receive(update, context)
+    
+    # User uploading .xlsx file for submission
+    elif state == 'awaiting_xlsx_upload':
+        if not doc.file_name.lower().endswith('.xlsx'):
+            await update.message.reply_text("*Invalid file type\\. Please upload an \\.xlsx file\\.*", parse_mode=ParseMode.MARKDOWN_V2)
+            return
+        await receive_user_file(update, context)
+        
     else:
-        await update.message.reply_text(
-            "*I'm not expecting a file right now\\. Please use the menu buttons\\.*",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        # Unauthorized or unexpected file upload
+        if is_admin(user.id):
+             await update.message.reply_text("*I'm not expecting a file right now\\. Please use the menu buttons\\.*", parse_mode=ParseMode.MARKDOWN_V2)
+        else:
+             await update.message.reply_text("*You are not authorized to perform this action or the bot is not expecting a file\\.*", parse_mode=ParseMode.MARKDOWN_V2)
+
+async def post_init(application: Application) -> None:
+    """Function to run after the bot is initialized."""
+    await schedule_daily_job(application)
+    scheduler.start()
+    logger.info("Scheduler started.")
+
 
 def main() -> None:
     """Start the bot."""
     persistence = PicklePersistence(filepath="bot_data.pkl")
-    application = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+    application = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
